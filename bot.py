@@ -1,6 +1,7 @@
 import asyncio
 import logging
-from datetime import datetime, timezone
+import os
+from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 
 import asyncpg
@@ -17,21 +18,15 @@ from telegram.ext import (
 # ============================================================
 # TELEGRAM BOT TOKEN
 # ============================================================
-#
-# TEST TOKENI
-# Daha sonra buraya kendi gerçek bot tokenini yazabilirsin.
-#
+
 BOT_TOKEN = "8383789007:AAEA8VxX2Dr7UmawfH15ZjAlfmD5BqmbqaA"
 
 
 # ============================================================
 # RAILWAY POSTGRESQL
 # ============================================================
-#
-# Railway'de PostgreSQL ekledikten sonra DATABASE_URL otomatik
-# olarak Environment Variables bölümünden alınacaktır.
-#
-DATABASE_URL = None
+
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 
 # ============================================================
@@ -65,30 +60,35 @@ db_pool = None
 # ============================================================
 
 async def connect_database():
-
     global db_pool
-
-    # Railway'in DATABASE_URL değişkenini al
-    import os
 
     database_url = os.getenv("DATABASE_URL")
 
     if not database_url:
-
         raise RuntimeError(
             "DATABASE_URL bulunamadı!\n"
-            "Railway'de PostgreSQL eklediğinden ve DATABASE_URL "
-            "değişkeninin bulunduğundan emin ol."
+            "Railway Variables bölümünde PostgreSQL "
+            "DATABASE_URL referansını ekle."
         )
 
-    db_pool = await asyncpg.create_pool(
-        database_url,
-        min_size=1,
-        max_size=10,
-        command_timeout=60,
-    )
+    try:
+        db_pool = await asyncpg.create_pool(
+            dsn=database_url,
+            min_size=1,
+            max_size=10,
+            command_timeout=60,
+        )
 
-    logger.info("PostgreSQL bağlantısı başarılı.")
+        async with db_pool.acquire() as connection:
+            await connection.fetchval("SELECT 1")
+
+        logger.info("✅ PostgreSQL bağlantısı başarılı.")
+
+    except Exception:
+        logger.exception(
+            "❌ PostgreSQL bağlantısı kurulamadı."
+        )
+        raise
 
 
 # ============================================================
@@ -102,17 +102,11 @@ async def create_database():
         await connection.execute("""
             CREATE TABLE IF NOT EXISTS messages (
                 id BIGSERIAL PRIMARY KEY,
-
                 chat_id BIGINT NOT NULL,
-
                 user_id BIGINT NOT NULL,
-
                 username TEXT,
-
                 first_name TEXT,
-
                 last_name TEXT,
-
                 message_date TIMESTAMPTZ NOT NULL
             );
         """)
@@ -129,7 +123,7 @@ async def create_database():
             ON messages(chat_id, message_date);
         """)
 
-    logger.info("Database tabloları hazır.")
+    logger.info("✅ Database tabloları hazır.")
 
 
 # ============================================================
@@ -149,78 +143,6 @@ def turkey_now():
 # GÜN BAŞLANGICI
 # ============================================================
 
-def start_of_day():
-
-    now = turkey_now()
-
-    return now.replace(
-        hour=0,
-        minute=0,
-        second=0,
-        microsecond=0
-    )
-
-
-# ============================================================
-# HAFTA BAŞLANGICI
-# ============================================================
-
-def start_of_week():
-
-    now = turkey_now()
-
-    day_start = now.replace(
-        hour=0,
-        minute=0,
-        second=0,
-        microsecond=0
-    )
-
-    return day_start.replace(
-        day=day_start.day
-    )
-
-
-# ============================================================
-# HAFTA BAŞLANGICI - PAZARTESİ
-# ============================================================
-
-def start_of_current_week():
-
-    now = turkey_now()
-
-    day_start = now.replace(
-        hour=0,
-        minute=0,
-        second=0,
-        microsecond=0
-    )
-
-    return day_start.replace(
-        day=day_start.day
-    )
-
-
-def weekly_start():
-
-    now = turkey_now()
-
-    midnight = now.replace(
-        hour=0,
-        minute=0,
-        second=0,
-        microsecond=0
-    )
-
-    return midnight.replace(
-        day=midnight.day
-    )
-
-
-# ============================================================
-# DAHA TEMİZ TARİH HESAPLAMA
-# ============================================================
-
 def get_day_start():
 
     now = turkey_now()
@@ -233,6 +155,10 @@ def get_day_start():
     )
 
 
+# ============================================================
+# HAFTA BAŞLANGICI - PAZARTESİ
+# ============================================================
+
 def get_week_start():
 
     now = turkey_now()
@@ -244,12 +170,14 @@ def get_week_start():
         microsecond=0
     )
 
-    return day_start - (
-        datetime.timedelta(days=day_start.weekday())
-        if False else
-        __import__("datetime").timedelta(days=day_start.weekday())
+    return day_start - timedelta(
+        days=day_start.weekday()
     )
 
+
+# ============================================================
+# AY BAŞLANGICI
+# ============================================================
 
 def get_month_start():
 
@@ -268,7 +196,7 @@ def get_month_start():
 # MESAJI DATABASE'E KAYDET
 # ============================================================
 
-async def save_message(update: Update):
+async def save_message(update: Update, context=None):
 
     if not update.message:
         return
@@ -277,10 +205,7 @@ async def save_message(update: Update):
     user = message.from_user
     chat = message.chat
 
-    if not user:
-        return
-
-    if not chat:
+    if not user or not chat:
         return
 
     # Sadece grup ve süpergruplar
@@ -290,13 +215,12 @@ async def save_message(update: Update):
     ):
         return
 
-    # Botların mesajlarını sayma
+    # Bot mesajlarını sayma
     if user.is_bot:
         return
 
     try:
 
-        # Telegram mesaj tarihi UTC olarak gelir.
         message_date = message.date
 
         if message_date.tzinfo is None:
@@ -318,7 +242,6 @@ async def save_message(update: Update):
                 )
                 VALUES ($1, $2, $3, $4, $5, $6)
                 """,
-
                 chat.id,
                 user.id,
                 user.username,
@@ -356,7 +279,6 @@ async def get_user_count(
                   AND user_id = $2
                   AND message_date >= $3
                 """,
-
                 chat_id,
                 user_id,
                 start_date
@@ -371,7 +293,6 @@ async def get_user_count(
                 WHERE chat_id = $1
                   AND user_id = $2
                 """,
-
                 chat_id,
                 user_id
             )
@@ -394,6 +315,9 @@ async def command_mesajim(
     chat = update.effective_chat
     user = update.effective_user
 
+    if not chat or not user:
+        return
+
     if chat.type not in (
         ChatType.GROUP,
         ChatType.SUPERGROUP
@@ -403,26 +327,22 @@ async def command_mesajim(
         )
         return
 
-    today = get_day_start()
-    week = get_week_start()
-    month = get_month_start()
-
     daily = await get_user_count(
         chat.id,
         user.id,
-        today
+        get_day_start()
     )
 
     weekly = await get_user_count(
         chat.id,
         user.id,
-        week
+        get_week_start()
     )
 
     monthly = await get_user_count(
         chat.id,
         user.id,
-        month
+        get_month_start()
     )
 
     total = await get_user_count(
@@ -456,6 +376,9 @@ async def command_gunluk(
 
     chat = update.effective_chat
     user = update.effective_user
+
+    if not chat or not user:
+        return
 
     if chat.type not in (
         ChatType.GROUP,
@@ -493,6 +416,9 @@ async def command_haftalik(
     chat = update.effective_chat
     user = update.effective_user
 
+    if not chat or not user:
+        return
+
     if chat.type not in (
         ChatType.GROUP,
         ChatType.SUPERGROUP
@@ -529,6 +455,9 @@ async def command_aylik(
     chat = update.effective_chat
     user = update.effective_user
 
+    if not chat or not user:
+        return
+
     if chat.type not in (
         ChatType.GROUP,
         ChatType.SUPERGROUP
@@ -564,6 +493,9 @@ async def command_toplam(
 
     chat = update.effective_chat
 
+    if not chat:
+        return
+
     if chat.type not in (
         ChatType.GROUP,
         ChatType.SUPERGROUP
@@ -586,7 +518,6 @@ async def command_toplam(
             ORDER BY total DESC
             LIMIT 100
             """,
-
             chat.id
         )
 
@@ -596,7 +527,6 @@ async def command_toplam(
             FROM messages
             WHERE chat_id = $1
             """,
-
             chat.id
         )
 
@@ -610,7 +540,10 @@ async def command_toplam(
 
     lines = []
 
-    for number, row in enumerate(users, start=1):
+    for number, row in enumerate(
+        users,
+        start=1
+    ):
 
         first_name = row["first_name"] or "İsimsiz"
         last_name = row["last_name"] or ""
@@ -620,7 +553,6 @@ async def command_toplam(
         username = row["username"]
 
         if username:
-
             name = f"{name} (@{username})"
 
         count = row["total"]
@@ -651,6 +583,9 @@ async def command_yardim(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
+
+    if not update.message:
+        return
 
     await update.message.reply_text(
         "🤖 <b>Telegram Mesaj Botu</b>\n\n"
@@ -694,21 +629,27 @@ async def main():
         "Telegram Mesaj Botu başlatılıyor..."
     )
 
-    # PostgreSQL
+    if not BOT_TOKEN:
+        raise RuntimeError(
+            "BOT_TOKEN bulunamadı!"
+        )
+
+    # PostgreSQL bağlantısı
     await connect_database()
 
+    # Tablolar
     await create_database()
 
-    # Telegram uygulaması
+    # Telegram
     application = (
         Application.builder()
         .token(BOT_TOKEN)
         .build()
     )
 
-    # --------------------------------------------------------
+    # ========================================================
     # KOMUTLAR
-    # --------------------------------------------------------
+    # ========================================================
 
     application.add_handler(
         CommandHandler(
@@ -752,14 +693,9 @@ async def main():
         )
     )
 
-    # --------------------------------------------------------
-    # TÜM NORMAL MESAJLARI SAY
-    # --------------------------------------------------------
-    #
-    # Yazı, fotoğraf, video, sticker vb. mesajları da yakalar.
-    # Komutlar yukarıdaki CommandHandler tarafından işlendiği
-    # için ayrıca mesaj olarak sayılmaz.
-    #
+    # ========================================================
+    # NORMAL MESAJLAR
+    # ========================================================
 
     application.add_handler(
         MessageHandler(
@@ -772,9 +708,9 @@ async def main():
         error_handler
     )
 
-    # --------------------------------------------------------
-    # BOTU ÇALIŞTIR
-    # --------------------------------------------------------
+    # ========================================================
+    # BAŞLAT
+    # ========================================================
 
     await application.initialize()
 
@@ -791,7 +727,6 @@ async def main():
     try:
 
         while True:
-
             await asyncio.sleep(3600)
 
     except asyncio.CancelledError:
@@ -807,7 +742,6 @@ async def main():
         await application.shutdown()
 
         if db_pool:
-
             await db_pool.close()
 
 
