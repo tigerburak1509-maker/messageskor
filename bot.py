@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import os
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import asyncpg
@@ -15,112 +15,75 @@ from telegram.ext import (
     filters,
 )
 
-# ============================================================
+# =========================================================
 # AYARLAR
-# ============================================================
+# =========================================================
 
 BOT_TOKEN = '8383789007:AAF4U2lzfnVAS0bb4Q69gW0LRTaADQvKzQY'
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 TURKEY_TZ = ZoneInfo("Europe/Istanbul")
 
-# BOTUN ÇALIŞACAĞI İKİ GRUP
 ALLOWED_GROUPS = {
     "heroprimesohbet",
     "testkanaliii00",
 }
 
-# ============================================================
-# LOG
-# ============================================================
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s"
-)
-
-logger = logging.getLogger("telegram-mesaj-botu")
-
 db_pool = None
 
+logging.basicConfig(
+    format="%(asctime)s | %(levelname)s | %(message)s",
+    level=logging.INFO,
+)
 
-# ============================================================
+logger = logging.getLogger("mesajbot")
+
+
+# =========================================================
 # GRUP KONTROLÜ
-# ============================================================
+# =========================================================
 
 def is_allowed_group(update: Update) -> bool:
-    """
-    Bot yalnızca belirlenen iki grupta çalışır.
-    """
-
+    message = update.effective_message
     chat = update.effective_chat
 
-    if not chat:
+    if not message or not chat:
         return False
 
-    if chat.type not in (
-        ChatType.GROUP,
-        ChatType.SUPERGROUP,
-    ):
+    if chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
         return False
 
-    username = chat.username
-
-    if not username:
-        return False
-
-    username = username.lower().lstrip("@")
+    username = (chat.username or "").lower().lstrip("@")
 
     return username in ALLOWED_GROUPS
 
 
-# ============================================================
-# DATABASE BAĞLANTISI
-# ============================================================
+# =========================================================
+# DATABASE
+# =========================================================
 
 async def connect_database():
-
     global db_pool
 
-    database_url = os.getenv("DATABASE_URL")
+    if not DATABASE_URL:
+        raise RuntimeError("DATABASE_URL bulunamadı!")
 
-    if not database_url:
-        raise RuntimeError(
-            "DATABASE_URL bulunamadı. "
-            "Railway Variables kontrol edilmeli."
-        )
+    logger.info("PostgreSQL bağlantısı başlatılıyor...")
 
-    try:
+    db_pool = await asyncpg.create_pool(
+        dsn=DATABASE_URL,
+        min_size=1,
+        max_size=10,
+        command_timeout=60,
+    )
 
-        db_pool = await asyncpg.create_pool(
-            dsn=database_url,
-            min_size=1,
-            max_size=10,
-            command_timeout=60,
-        )
+    async with db_pool.acquire() as connection:
+        await connection.fetchval("SELECT 1")
 
-        async with db_pool.acquire() as connection:
-            await connection.fetchval("SELECT 1")
+    logger.info("✅ PostgreSQL bağlantısı başarılı.")
 
-        logger.info(
-            "✅ PostgreSQL bağlantısı başarılı."
-        )
-
-    except Exception:
-
-        logger.exception(
-            "❌ PostgreSQL bağlantısı kurulamadı."
-        )
-
-        raise
-
-
-# ============================================================
-# DATABASE TABLOLARI
-# ============================================================
 
 async def create_database():
-
     async with db_pool.acquire() as connection:
 
         await connection.execute("""
@@ -136,41 +99,27 @@ async def create_database():
         """)
 
         await connection.execute("""
-            CREATE INDEX IF NOT EXISTS
-            idx_messages_chat_user_date
+            CREATE INDEX IF NOT EXISTS idx_messages_chat_user_date
             ON messages(chat_id, user_id, message_date);
         """)
 
         await connection.execute("""
-            CREATE INDEX IF NOT EXISTS
-            idx_messages_chat_date
+            CREATE INDEX IF NOT EXISTS idx_messages_chat_date
             ON messages(chat_id, message_date);
         """)
 
-    logger.info(
-        "✅ Database tabloları hazır."
-    )
+    logger.info("✅ Database tabloları hazır.")
 
 
-# ============================================================
+# =========================================================
 # TÜRKİYE SAATİ
-# ============================================================
+# =========================================================
 
 def turkey_now():
+    return datetime.now(TURKEY_TZ)
 
-    return datetime.now(
-        timezone.utc
-    ).astimezone(
-        TURKEY_TZ
-    )
-
-
-# ============================================================
-# GÜN BAŞLANGICI
-# ============================================================
 
 def get_day_start():
-
     now = turkey_now()
 
     return now.replace(
@@ -181,32 +130,13 @@ def get_day_start():
     )
 
 
-# ============================================================
-# HAFTA BAŞLANGICI
-# ============================================================
-
 def get_week_start():
+    today = get_day_start()
 
-    now = turkey_now()
+    return today - timedelta(days=today.weekday())
 
-    day_start = now.replace(
-        hour=0,
-        minute=0,
-        second=0,
-        microsecond=0,
-    )
-
-    return day_start - timedelta(
-        days=day_start.weekday()
-    )
-
-
-# ============================================================
-# AY BAŞLANGICI
-# ============================================================
 
 def get_month_start():
-
     now = turkey_now()
 
     return now.replace(
@@ -218,196 +148,166 @@ def get_month_start():
     )
 
 
-# ============================================================
-# MESAJ KAYDET
-# ============================================================
+# =========================================================
+# MESAJ KAYDETME
+# =========================================================
 
-async def save_message(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
+async def save_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    if not update.message:
+    message = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+
+    if not message or not chat or not user:
+        return
+
+    logger.info(
+        "📩 UPDATE ALINDI | chat_id=%s | chat_type=%s | username=%s | user=%s | text=%r",
+        chat.id,
+        chat.type,
+        chat.username,
+        user.username,
+        message.text,
+    )
+
+    # Özel sohbetlerde mesajları sadece debug için görüyoruz.
+    if chat.type == ChatType.PRIVATE:
+        logger.info("ℹ️ Özel sohbet mesajı alındı.")
+        return
+
+    # Sadece grup/süpergrup
+    if chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
         return
 
     # Sadece izin verilen iki grup
     if not is_allowed_group(update):
-        return
-
-    message = update.message
-    user = message.from_user
-    chat = message.chat
-
-    if not user or not chat:
+        logger.info(
+            "🚫 İzin verilmeyen grup: %s (%s)",
+            chat.title,
+            chat.username,
+        )
         return
 
     # Bot mesajlarını sayma
     if user.is_bot:
         return
 
-    try:
-
-        message_date = message.date
-
-        if message_date.tzinfo is None:
-            message_date = message_date.replace(
-                tzinfo=timezone.utc
-            )
-
-        async with db_pool.acquire() as connection:
-
-            await connection.execute(
-                """
-                INSERT INTO messages (
-                    chat_id,
-                    user_id,
-                    username,
-                    first_name,
-                    last_name,
-                    message_date
-                )
-                VALUES ($1, $2, $3, $4, $5, $6)
-                """,
-                chat.id,
-                user.id,
-                user.username,
-                user.first_name,
-                user.last_name,
-                message_date,
-            )
-
-        logger.info(
-            "💬 Mesaj kaydedildi | grup=%s | kullanıcı=%s",
-            chat.username,
-            user.username or user.first_name,
-        )
-
-    except Exception:
-
-        logger.exception(
-            "❌ Mesaj kaydedilirken hata oluştu."
-        )
-
-
-# ============================================================
-# KULLANICI MESAJ SAYISI
-# ============================================================
-
-async def get_user_count(
-    chat_id,
-    user_id,
-    start_date=None,
-):
+    message_date = message.date
 
     async with db_pool.acquire() as connection:
+        await connection.execute(
+            """
+            INSERT INTO messages (
+                chat_id,
+                user_id,
+                username,
+                first_name,
+                last_name,
+                message_date
+            )
+            VALUES ($1, $2, $3, $4, $5, $6)
+            """,
+            chat.id,
+            user.id,
+            user.username,
+            user.first_name,
+            user.last_name,
+            message_date,
+        )
 
-        if start_date:
+    logger.info(
+        "💾 MESAJ KAYDEDİLDİ | grup=%s | kullanıcı=%s",
+        chat.username,
+        user.username or user.first_name,
+    )
 
-            count = await connection.fetchval(
-                """
-                SELECT COUNT(*)
-                FROM messages
-                WHERE chat_id = $1
-                  AND user_id = $2
-                  AND message_date >= $3
-                """,
+
+# =========================================================
+# SAYIM
+# =========================================================
+
+async def get_user_count(chat_id, user_id, start_date=None):
+
+    if start_date:
+        query = """
+            SELECT COUNT(*)
+            FROM messages
+            WHERE chat_id = $1
+              AND user_id = $2
+              AND message_date >= $3
+        """
+
+        async with db_pool.acquire() as connection:
+            return await connection.fetchval(
+                query,
                 chat_id,
                 user_id,
                 start_date,
             )
 
-        else:
+    query = """
+        SELECT COUNT(*)
+        FROM messages
+        WHERE chat_id = $1
+          AND user_id = $2
+    """
 
-            count = await connection.fetchval(
-                """
-                SELECT COUNT(*)
-                FROM messages
-                WHERE chat_id = $1
-                  AND user_id = $2
-                """,
-                chat_id,
-                user_id,
-            )
-
-    return count or 0
+    async with db_pool.acquire() as connection:
+        return await connection.fetchval(
+            query,
+            chat_id,
+            user_id,
+        )
 
 
-# ============================================================
-# /mesajim
-# ============================================================
+# =========================================================
+# /MESAJIM
+# =========================================================
 
-async def command_mesajim(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
+async def mesajim(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    if not update.message:
+    message = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+
+    if not message or not chat or not user:
+        return
+
+    logger.info(
+        "🟢 /mesajim çalıştı | chat=%s | user=%s",
+        chat.id,
+        user.id,
+    )
+
+    if chat.type == ChatType.PRIVATE:
+        await message.reply_text(
+            "✅ Bot çalışıyor.\n\n"
+            "Bu bot mesaj sayımını sadece izin verilen gruplarda yapar."
+        )
         return
 
     if not is_allowed_group(update):
         return
 
-    chat = update.effective_chat
-    user = update.effective_user
+    count = await get_user_count(chat.id, user.id)
 
-    if not chat or not user:
-        return
-
-    daily = await get_user_count(
-        chat.id,
-        user.id,
-        get_day_start(),
-    )
-
-    weekly = await get_user_count(
-        chat.id,
-        user.id,
-        get_week_start(),
-    )
-
-    monthly = await get_user_count(
-        chat.id,
-        user.id,
-        get_month_start(),
-    )
-
-    total = await get_user_count(
-        chat.id,
-        user.id,
-    )
-
-    name = user.first_name or "Kullanıcı"
-
-    await update.message.reply_text(
-        f"📊 <b>{name}</b>\n\n"
-        f"📅 Bugün: <b>{daily:,}</b>\n"
-        f"📆 Bu hafta: <b>{weekly:,}</b>\n"
-        f"🗓 Bu ay: <b>{monthly:,}</b>\n"
-        f"💬 Toplam: <b>{total:,}</b>",
-        parse_mode="HTML",
+    await message.reply_text(
+        f"📊 {user.first_name}\n\n"
+        f"Toplam mesajınız: {count}"
     )
 
 
-# ============================================================
-# /gunluk
-# ============================================================
+# =========================================================
+# /GUNLUK
+# =========================================================
 
-async def command_gunluk(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
-
-    if not update.message:
-        return
+async def gunluk(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not is_allowed_group(update):
         return
 
-    chat = update.effective_chat
     user = update.effective_user
-
-    if not chat or not user:
-        return
+    chat = update.effective_chat
 
     count = await get_user_count(
         chat.id,
@@ -415,35 +315,22 @@ async def command_gunluk(
         get_day_start(),
     )
 
-    name = user.first_name or "Kullanıcı"
-
-    await update.message.reply_text(
-        f"📅 <b>{name}</b>\n\n"
-        f"Bugün <b>{count:,}</b> mesaj gönderdin.",
-        parse_mode="HTML",
+    await update.effective_message.reply_text(
+        f"📅 Bugünkü mesajınız: {count}"
     )
 
 
-# ============================================================
-# /haftalik
-# ============================================================
+# =========================================================
+# /HAFTALIK
+# =========================================================
 
-async def command_haftalik(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
-
-    if not update.message:
-        return
+async def haftalik(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not is_allowed_group(update):
         return
 
-    chat = update.effective_chat
     user = update.effective_user
-
-    if not chat or not user:
-        return
+    chat = update.effective_chat
 
     count = await get_user_count(
         chat.id,
@@ -451,35 +338,22 @@ async def command_haftalik(
         get_week_start(),
     )
 
-    name = user.first_name or "Kullanıcı"
-
-    await update.message.reply_text(
-        f"📆 <b>{name}</b>\n\n"
-        f"Bu hafta <b>{count:,}</b> mesaj gönderdin.",
-        parse_mode="HTML",
+    await update.effective_message.reply_text(
+        f"📅 Bu haftaki mesajınız: {count}"
     )
 
 
-# ============================================================
-# /aylik
-# ============================================================
+# =========================================================
+# /AYLIK
+# =========================================================
 
-async def command_aylik(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
-
-    if not update.message:
-        return
+async def aylik(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not is_allowed_group(update):
         return
 
-    chat = update.effective_chat
     user = update.effective_user
-
-    if not chat or not user:
-        return
+    chat = update.effective_chat
 
     count = await get_user_count(
         chat.id,
@@ -487,239 +361,157 @@ async def command_aylik(
         get_month_start(),
     )
 
-    name = user.first_name or "Kullanıcı"
-
-    await update.message.reply_text(
-        f"🗓 <b>{name}</b>\n\n"
-        f"Bu ay <b>{count:,}</b> mesaj gönderdin.",
-        parse_mode="HTML",
+    await update.effective_message.reply_text(
+        f"📅 Bu ayki mesajınız: {count}"
     )
 
 
-# ============================================================
-# /toplam
-# ============================================================
+# =========================================================
+# /TOPLAM
+# =========================================================
 
-async def command_toplam(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
-
-    if not update.message:
-        return
+async def toplam(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not is_allowed_group(update):
         return
 
     chat = update.effective_chat
-
-    if not chat:
-        return
 
     async with db_pool.acquire() as connection:
 
-        users = await connection.fetch(
+        rows = await connection.fetch(
             """
             SELECT
                 user_id,
-                MAX(first_name) AS first_name,
-                MAX(last_name) AS last_name,
-                MAX(username) AS username,
+                username,
+                first_name,
+                last_name,
                 COUNT(*) AS total
             FROM messages
             WHERE chat_id = $1
-            GROUP BY user_id
+            GROUP BY
+                user_id,
+                username,
+                first_name,
+                last_name
             ORDER BY total DESC
-            LIMIT 100
+            LIMIT 20
             """,
             chat.id,
         )
 
-        total_messages = await connection.fetchval(
-            """
-            SELECT COUNT(*)
-            FROM messages
-            WHERE chat_id = $1
-            """,
-            chat.id,
+    if not rows:
+        await update.effective_message.reply_text(
+            "Henüz kayıtlı mesaj bulunmuyor."
         )
-
-    if not users:
-
-        await update.message.reply_text(
-            "📊 Henüz kayıtlı mesaj bulunmuyor."
-        )
-
         return
 
-    lines = []
+    lines = ["🏆 TOPLAM MESAJ SIRALAMASI", ""]
 
-    for number, row in enumerate(
-        users,
-        start=1,
-    ):
+    for index, row in enumerate(rows, start=1):
 
-        first_name = row["first_name"] or "İsimsiz"
-        last_name = row["last_name"] or ""
-
-        name = f"{first_name} {last_name}".strip()
-
-        username = row["username"]
-
-        if username:
-            name = f"{name} (@{username})"
-
-        count = row["total"]
+        name = (
+            f"@{row['username']}"
+            if row["username"]
+            else row["first_name"] or "Kullanıcı"
+        )
 
         lines.append(
-            f"<b>{number}.</b> "
-            f"{name} — "
-            f"<b>{count:,}</b>"
+            f"{index}. {name} — {row['total']} mesaj"
         )
 
-    text = (
-        "🏆 <b>GRUP MESAJ İSTATİSTİĞİ</b>\n\n"
-        + "\n".join(lines)
-        + f"\n\n💬 <b>Toplam mesaj:</b> "
-        f"{total_messages:,}"
-    )
-
-    await update.message.reply_text(
-        text,
-        parse_mode="HTML",
+    await update.effective_message.reply_text(
+        "\n".join(lines)
     )
 
 
-# ============================================================
-# /yardim
-# ============================================================
+# =========================================================
+# /YARDIM
+# =========================================================
 
-async def command_yardim(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
+async def yardim(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    if not update.message:
-        return
-
-    if not is_allowed_group(update):
-        return
-
-    await update.message.reply_text(
-        "🤖 <b>Telegram Mesaj Botu</b>\n\n"
-        "📊 /mesajim\n"
-        "Kendi günlük, haftalık, aylık ve toplam mesajını gösterir.\n\n"
-        "📅 /gunluk\n"
-        "Bugünkü mesajını gösterir.\n\n"
-        "📆 /haftalik\n"
-        "Bu haftaki mesajını gösterir.\n\n"
-        "🗓 /aylik\n"
-        "Bu ayki mesajını gösterir.\n\n"
-        "🏆 /toplam\n"
-        "Gruptaki kullanıcıların toplam mesajlarını gösterir.\n\n"
-        "ℹ️ Sadece yetkili gruplarda çalışır.",
-        parse_mode="HTML",
+    await update.effective_message.reply_text(
+        "🤖 MESAJ SAYMA BOTU\n\n"
+        "/mesajim - Toplam mesajınız\n"
+        "/gunluk - Bugünkü mesajınız\n"
+        "/haftalik - Haftalık mesajınız\n"
+        "/aylik - Aylık mesajınız\n"
+        "/toplam - Grup sıralaması\n"
+        "/yardim - Yardım"
     )
 
 
-# ============================================================
-# HATA YÖNETİMİ
-# ============================================================
+# =========================================================
+# HATA
+# =========================================================
 
-async def error_handler(
-    update: object,
-    context: ContextTypes.DEFAULT_TYPE,
-):
+async def error_handler(update, context):
 
     logger.error(
-        "Telegram hatası: %s",
+        "❌ TELEGRAM HATASI: %s",
         context.error,
+        exc_info=context.error,
     )
 
 
-# ============================================================
-# BOT
-# ============================================================
+# =========================================================
+# MAIN
+# =========================================================
 
 async def main():
 
-    logger.info(
-        "🚀 Telegram Mesaj Botu başlatılıyor..."
-    )
+    logger.info("========================================")
+    logger.info("🚀 TELEGRAM MESAJ BOTU BAŞLATILIYOR")
+    logger.info("========================================")
 
     if not BOT_TOKEN:
         raise RuntimeError(
-            "BOT_TOKEN Railway Variables içinde bulunamadı."
+            "BOT_TOKEN Railway Variables içinde bulunamadı!"
         )
 
     if not DATABASE_URL:
         raise RuntimeError(
-            "DATABASE_URL Railway Variables içinde bulunamadı."
+            "DATABASE_URL Railway Variables içinde bulunamadı!"
         )
 
-    # PostgreSQL
+    # DATABASE
     await connect_database()
-
-    # Tablolar
     await create_database()
 
-    # Telegram
+    # TELEGRAM
     application = (
         Application.builder()
         .token(BOT_TOKEN)
         .build()
     )
 
-    # ========================================================
-    # KOMUTLAR
-    # ========================================================
-
+    # Komutlar
     application.add_handler(
-        CommandHandler(
-            "mesajim",
-            command_mesajim,
-        )
+        CommandHandler("mesajim", mesajim)
     )
 
     application.add_handler(
-        CommandHandler(
-            "gunluk",
-            command_gunluk,
-        )
+        CommandHandler("gunluk", gunluk)
     )
 
     application.add_handler(
-        CommandHandler(
-            "haftalik",
-            command_haftalik,
-        )
+        CommandHandler("haftalik", haftalik)
     )
 
     application.add_handler(
-        CommandHandler(
-            "aylik",
-            command_aylik,
-        )
+        CommandHandler("aylik", aylik)
     )
 
     application.add_handler(
-        CommandHandler(
-            "toplam",
-            command_toplam,
-        )
+        CommandHandler("toplam", toplam)
     )
 
     application.add_handler(
-        CommandHandler(
-            "yardim",
-            command_yardim,
-        )
+        CommandHandler("yardim", yardim)
     )
 
-    # ========================================================
-    # NORMAL MESAJLAR
-    # ========================================================
-
+    # Normal mesajlar
     application.add_handler(
         MessageHandler(
             filters.ALL & ~filters.COMMAND,
@@ -727,15 +519,23 @@ async def main():
         )
     )
 
-    application.add_error_handler(
-        error_handler
+    application.add_error_handler(error_handler)
+
+    # Telegram bağlantısı
+    await application.initialize()
+
+    bot_info = await application.bot.get_me()
+
+    logger.info(
+        "🤖 BOT: @%s | id=%s",
+        bot_info.username,
+        bot_info.id,
     )
 
-    # ========================================================
-    # BAŞLAT
-    # ========================================================
-
-    await application.initialize()
+    logger.info(
+        "📡 can_read_all_group_messages=%s",
+        bot_info.can_read_all_group_messages,
+    )
 
     # Webhook varsa temizle
     await application.bot.delete_webhook(
@@ -744,56 +544,36 @@ async def main():
 
     await application.start()
 
+    # SADECE message + my_chat_member
     await application.updater.start_polling(
-        allowed_updates=["message"],
+        allowed_updates=[
+            "message",
+            "my_chat_member",
+        ],
         drop_pending_updates=False,
     )
 
-    logger.info(
-        "✅ BOT AKTİF."
-    )
-
-    logger.info(
-        "✅ İzin verilen gruplar: %s",
-        ", ".join(
-            f"@{group}"
-            for group in ALLOWED_GROUPS
-        ),
-    )
+    logger.info("========================================")
+    logger.info("✅ BOT AKTİF")
+    logger.info("📊 Mesajlar sayılıyor.")
+    logger.info("🔒 İzin verilen gruplar:")
+    logger.info("   @heroprimesohbet")
+    logger.info("   @testkanaliii00")
+    logger.info("========================================")
 
     try:
-
         while True:
             await asyncio.sleep(3600)
-
-    except asyncio.CancelledError:
-
-        pass
 
     finally:
 
         await application.updater.stop()
-
         await application.stop()
-
         await application.shutdown()
 
         if db_pool:
             await db_pool.close()
 
 
-# ============================================================
-# PROGRAM
-# ============================================================
-
 if __name__ == "__main__":
-
-    try:
-
-        asyncio.run(main())
-
-    except KeyboardInterrupt:
-
-        logger.info(
-            "🛑 Bot kapatıldı."
-        )
+    asyncio.run(main())
