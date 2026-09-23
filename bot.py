@@ -19,7 +19,7 @@ from telegram.ext import (
 # TELEGRAM BOT TOKEN
 # ============================================================
 
-BOT_TOKEN = "8383789007:AAEA8VxX2Dr7UmawfH15ZjAlfmD5BqmbqaA"
+BOT_TOKEN = "8383789007:AAF4U2lzfnVAS0bb4Q69gW0LRTaADQvKzQY"
 
 
 # ============================================================
