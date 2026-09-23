@@ -19,7 +19,7 @@ from telegram.ext import (
 # AYARLAR
 # =========================================================
 
-BOT_TOKEN = '8383789007:AAF4U2lzfnVAS0bb4Q69gW0LRTaADQvKzQY'
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 TURKEY_TZ = ZoneInfo("Europe/Istanbul")
